@@ -198,6 +198,9 @@ class ProxyService:
             tool_calls = []
             response_text = ""
             final_chunk = None
+            # Buffer this round's chunks; an Ollama round that turns out to contain
+            # tool_calls is internal protocol state and must never reach the client.
+            buffered_chunks = []
 
             ndjson_iter = iter_ndjson_chunks(stream_ollama(current_payload))
             async for json_obj in ndjson_iter:
@@ -210,13 +213,19 @@ class ProxyService:
                     response_text = json_obj.get("message", {}).get("content", "")
                     break
 
-                yield json.dumps(json_obj).encode() + b"\n"
+                buffered_chunks.append(json_obj)
 
             if not tool_calls:
-                # No tool calls required, streaming complete
+                # Genuinely final round: forward the buffered content and the single
+                # terminal chunk to the client.
+                for buffered in buffered_chunks:
+                    yield json.dumps(buffered).encode() + b"\n"
                 if final_chunk:
                     yield json.dumps(final_chunk).encode() + b"\n"
                 break
+
+            # Tool-call round detected; buffered_chunks and final_chunk belong to
+            # internal protocol state and are intentionally discarded here.
 
             # Tool calls detected; execute them
             messages.append({"role": "assistant", "content": response_text, "tool_calls": tool_calls})

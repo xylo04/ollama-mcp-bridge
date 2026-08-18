@@ -295,8 +295,8 @@ async def test_proxy_service_merges_request_headers_with_configured_ollama_heade
 
 
 @pytest.mark.anyio
-async def test_streaming_tool_round_suppresses_intermediate_done(monkeypatch):
-    """Tool-call rounds must not expose terminal chunks to streaming clients."""
+async def test_streaming_tool_round_is_fully_suppressed(monkeypatch):
+    """Tool-call rounds are internal protocol state and must not reach streaming clients."""
     from ollama_mcp_bridge import proxy_service
     from ollama_mcp_bridge.mcp_manager import MCPManager
 
@@ -336,15 +336,9 @@ async def test_streaming_tool_round_suppresses_intermediate_done(monkeypatch):
         chunks = [
             json.loads(chunk) async for chunk in service._proxy_with_tools_streaming("/api/chat", {"messages": []})
         ]
+        # The tool-call round is internal protocol state: its chunks (including its
+        # own terminal marker) must be suppressed, leaving only the final round.
         assert chunks == [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{"function": {"name": "test_tool", "arguments": {}}}],
-                },
-                "done": False,
-            },
             {"message": {"role": "assistant", "content": "Final answer"}, "done": False},
             {"message": {"role": "assistant", "content": ""}, "done": True},
         ]
