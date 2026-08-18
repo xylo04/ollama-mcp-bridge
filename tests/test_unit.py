@@ -294,6 +294,65 @@ async def test_proxy_service_merges_request_headers_with_configured_ollama_heade
         await mgr.http_client.aclose()
 
 
+@pytest.mark.anyio
+async def test_streaming_tool_round_suppresses_intermediate_done(monkeypatch):
+    """Tool-call rounds must not expose terminal chunks to streaming clients."""
+    from ollama_mcp_bridge import proxy_service
+    from ollama_mcp_bridge.mcp_manager import MCPManager
+
+    responses = iter(
+        [
+            [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"function": {"name": "test_tool", "arguments": {}}}],
+                    },
+                    "done": False,
+                },
+                {"message": {"role": "assistant", "content": ""}, "done": True},
+            ],
+            [
+                {"message": {"role": "assistant", "content": "Final answer"}, "done": False},
+                {"message": {"role": "assistant", "content": ""}, "done": True},
+            ],
+        ]
+    )
+
+    async def fake_iter_ndjson_chunks(_):
+        for response in next(responses):
+            yield response
+
+    async def fake_call_tool(_, __):
+        return "tool result"
+
+    monkeypatch.setattr(proxy_service, "iter_ndjson_chunks", fake_iter_ndjson_chunks)
+    manager = MCPManager()
+    manager.all_tools = [{"type": "function", "function": {"name": "test_tool"}}]
+    manager.call_tool = fake_call_tool
+    service = proxy_service.ProxyService(manager)
+    try:
+        chunks = [
+            json.loads(chunk) async for chunk in service._proxy_with_tools_streaming("/api/chat", {"messages": []})
+        ]
+        assert chunks == [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "test_tool", "arguments": {}}}],
+                },
+                "done": False,
+            },
+            {"message": {"role": "assistant", "content": "Final answer"}, "done": False},
+            {"message": {"role": "assistant", "content": ""}, "done": True},
+        ]
+    finally:
+        await service.cleanup()
+        await manager.http_client.aclose()
+
+
 def test_is_port_in_use():
     """Test the is_port_in_use utility."""
     import socket
