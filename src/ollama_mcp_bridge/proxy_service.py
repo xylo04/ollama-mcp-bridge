@@ -111,9 +111,15 @@ class ProxyService:
         final_payload["tools"] = None  # Don't allow more tool calls
 
         ndjson_iter = iter_ndjson_chunks(stream_ollama(final_payload))
+        final_chunk = None
         async for json_obj in ndjson_iter:
-            buffer_chunk = json.dumps(json_obj).encode() + b"\n"
-            yield buffer_chunk
+            if json_obj.get("done"):
+                final_chunk = json_obj
+                continue
+            yield json.dumps(json_obj).encode() + b"\n"
+
+        if final_chunk:
+            yield json.dumps(final_chunk).encode() + b"\n"
 
     async def _proxy_with_tools_non_streaming(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Handle non-streaming chat requests with tools"""
@@ -191,25 +197,25 @@ class ProxyService:
 
             tool_calls = []
             response_text = ""
+            final_chunk = None
 
             ndjson_iter = iter_ndjson_chunks(stream_ollama(current_payload))
             async for json_obj in ndjson_iter:
-                # Stream all chunks directly to the client
-                buffer_chunk = json.dumps(json_obj).encode() + b"\n"
-                yield buffer_chunk
-
                 extracted_calls = self._extract_tool_calls(json_obj)
                 if extracted_calls:
                     tool_calls = extracted_calls
 
                 if json_obj.get("done"):
+                    final_chunk = json_obj
                     response_text = json_obj.get("message", {}).get("content", "")
-                    if extracted_calls:
-                        tool_calls = extracted_calls
                     break
+
+                yield json.dumps(json_obj).encode() + b"\n"
 
             if not tool_calls:
                 # No tool calls required, streaming complete
+                if final_chunk:
+                    yield json.dumps(final_chunk).encode() + b"\n"
                 break
 
             # Tool calls detected; execute them
