@@ -111,15 +111,9 @@ class ProxyService:
         final_payload["tools"] = None  # Don't allow more tool calls
 
         ndjson_iter = iter_ndjson_chunks(stream_ollama(final_payload))
-        final_chunk = None
         async for json_obj in ndjson_iter:
-            if json_obj.get("done"):
-                final_chunk = json_obj
-                continue
-            yield json.dumps(json_obj).encode() + b"\n"
-
-        if final_chunk:
-            yield json.dumps(final_chunk).encode() + b"\n"
+            buffer_chunk = json.dumps(json_obj).encode() + b"\n"
+            yield buffer_chunk
 
     async def _proxy_with_tools_non_streaming(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Handle non-streaming chat requests with tools"""
@@ -195,37 +189,39 @@ class ProxyService:
             current_payload = dict(payload)
             current_payload["messages"] = messages
 
-            tool_calls = []
             response_text = ""
             final_chunk = None
-            # Buffer this round's chunks; an Ollama round that turns out to contain
-            # tool_calls is internal protocol state and must never reach the client.
-            buffered_chunks = []
+            # Parallel tool calls arrive one per chunk, so collect them, don't replace
+            pending_calls: Dict[Any, Any] = {}
 
             ndjson_iter = iter_ndjson_chunks(stream_ollama(current_payload))
             async for json_obj in ndjson_iter:
                 extracted_calls = self._extract_tool_calls(json_obj)
-                if extracted_calls:
-                    tool_calls = extracted_calls
+                for tool_call in extracted_calls:
+                    pending_calls[tool_call.get("id") or len(pending_calls)] = tool_call
 
                 if json_obj.get("done"):
+                    # Hold it back: only the last round's terminal chunk is the client's
                     final_chunk = json_obj
-                    response_text = json_obj.get("message", {}).get("content", "")
                     break
 
-                buffered_chunks.append(json_obj)
+                message = json_obj.get("message", {})
+                # The terminal chunk has no content when streaming, so accumulate it here
+                response_text += message.get("content", "") or ""
 
+                if extracted_calls:
+                    # The bridge runs these tools itself, so the client must not see them
+                    message = {k: v for k, v in message.items() if k != "tool_calls"}
+                    json_obj = {**json_obj, "message": message}
+
+                yield json.dumps(json_obj).encode() + b"\n"
+
+            tool_calls = list(pending_calls.values())
             if not tool_calls:
-                # Genuinely final round: forward the buffered content and the single
-                # terminal chunk to the client.
-                for buffered in buffered_chunks:
-                    yield json.dumps(buffered).encode() + b"\n"
+                # No tool calls required, streaming complete
                 if final_chunk:
                     yield json.dumps(final_chunk).encode() + b"\n"
                 break
-
-            # Tool-call round detected; buffered_chunks and final_chunk belong to
-            # internal protocol state and are intentionally discarded here.
 
             # Tool calls detected; execute them
             messages.append({"role": "assistant", "content": response_text, "tool_calls": tool_calls})
